@@ -60,7 +60,7 @@ jobs:
           cmake --version
           ninja --version
 
-      - name: Patch Dart 3.13 snapshot symbol compatibility
+      - name: Patch Dart snapshot symbol compatibility
         shell: bash
         run: |
           set -euo pipefail
@@ -72,16 +72,16 @@ jobs:
           old = "sym = dynsym.get_symbol_by_name('_kDartVmSnapshotData')[0]"
           new = (
               "syms = (dynsym.get_symbol_by_name('_kDartVmSnapshotData') or "
-              "dynsym.get_symbol_by_name('_kDartSnapshotData'))\\n"
-              "    assert syms, \\"Cannot find Dart snapshot data symbol "
-              "(_kDartVmSnapshotData/_kDartSnapshotData)\\"\\n"
+              "dynsym.get_symbol_by_name('_kDartSnapshotData'))\n"
+              "    assert syms, 'Cannot find Dart snapshot data symbol'\n"
               "    sym = syms[0]"
           )
+
           if old in source:
               path.write_text(source.replace(old, new, 1))
-              print("Applied compatibility fallback for _kDartSnapshotData")
-          elif "_kDartSnapshotData" in source and "_kDartVmSnapshotData" in source:
-              print("Compatible symbol fallback already appears to be present")
+              print("Applied fallback to _kDartSnapshotData")
+          elif "get_symbol_by_name('_kDartSnapshotData')" in source:
+              print("Snapshot symbol fallback already exists")
           else:
               raise SystemExit(
                   "Could not safely patch extract_dart_info.py; upstream source changed"
