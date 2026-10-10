@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow and input files
         uses: actions/checkout@v4
 
       - name: Validate input libraries
@@ -40,8 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            gcc-13 g++-13 \
+            build-essential gcc-13 g++-13 \
             cmake ninja-build pkg-config \
             libicu-dev libcapstone-dev \
             python3 python3-pip python3-venv \
@@ -53,6 +52,17 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install pyelftools requests
 
+      - name: Get Blutter with Dart 3.13 support
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/worawit/blutter.git blutter-src
+          git -C blutter-src fetch --depth 1 origin pull/213/head:refs/remotes/origin/pr-213
+          git -C blutter-src checkout refs/remotes/origin/pr-213
+          mkdir -p blutter-src/input
+          cp input/libapp.so input/libflutter.so blutter-src/input/
+          git -C blutter-src log -1 --oneline
+
       - name: Check compiler
         run: |
           gcc-13 --version
@@ -60,57 +70,21 @@ jobs:
           cmake --version
           ninja --version
 
-      - name: Patch Dart snapshot symbol compatibility
-        shell: bash
-        run: |
-          set -euo pipefail
-          .venv/bin/python - <<'PY'
-          from pathlib import Path
-
-          path = Path("extract_dart_info.py")
-          source = path.read_text()
-          lines = source.splitlines()
-          target = "sym = dynsym.get_symbol_by_name('_kDartVmSnapshotData')[0]"
-
-          for index, line in enumerate(lines):
-              if line.strip() == target:
-                  indent = line[:len(line) - len(line.lstrip())]
-                  replacement = [
-                      indent + "syms = dynsym.get_symbol_by_name('_kDartVmSnapshotData')",
-                      indent + "if not syms:",
-                      indent + "    syms = dynsym.get_symbol_by_name('_kDartSnapshotData')",
-                      indent + "assert syms, 'Cannot find Dart snapshot data symbol (_kDartVmSnapshotData/_kDartSnapshotData)'",
-                      indent + "sym = syms[0]",
-                  ]
-                  lines[index:index + 1] = replacement
-                  patched = "\n".join(lines) + ("\n" if source.endswith("\n") else "")
-                  compile(patched, str(path), "exec")
-                  path.write_text(patched)
-                  print("Applied snapshot-symbol fallback and verified Python syntax")
-                  break
-          else:
-              if "_kDartSnapshotData" in source and "_kDartVmSnapshotData" in source:
-                  compile(source, str(path), "exec")
-                  print("Snapshot-symbol fallback already present; syntax is valid")
-              else:
-                  raise SystemExit("Could not safely patch extract_dart_info.py; upstream source changed")
-          PY
-
       - name: Run Blutter
         env:
           CC: gcc-13
           CXX: g++-13
         run: |
           set -euo pipefail
-          .venv/bin/python blutter.py input output
+          .venv/bin/python blutter-src/blutter.py blutter-src/input blutter-src/output
 
       - name: Package analysis results
         if: success()
         run: |
           set -euo pipefail
-          test -d output
-          test "$(find output -type f | wc -l)" -gt 0
-          zip -qr blutter-output.zip output
+          test -d blutter-src/output
+          test "$(find blutter-src/output -type f | wc -l)" -gt 0
+          zip -qr blutter-output.zip blutter-src/output
 
       - name: Upload ZIP artifact
         if: success()
