@@ -1,0 +1,86 @@
+name: Blutter Analyze
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "input/**"
+      - ".github/workflows/blutter.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blutter-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate input libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s input/libapp.so || {
+            echo "::error::Missing input/libapp.so"
+            exit 1
+          }
+          test -s input/libflutter.so || {
+            echo "::error::Missing input/libflutter.so"
+            exit 1
+          }
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            gcc-13 g++-13 \
+            cmake ninja-build pkg-config \
+            libicu-dev libcapstone-dev \
+            python3 python3-pip python3-venv \
+            git zip unzip
+
+      - name: Configure Python environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install pyelftools requests
+
+      - name: Check compiler
+        run: |
+          gcc-13 --version
+          g++-13 --version
+          cmake --version
+          ninja --version
+
+      - name: Run Blutter
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: |
+          set -euo pipefail
+          .venv/bin/python blutter.py input output
+
+      - name: Package analysis results
+        if: success()
+        run: |
+          set -euo pipefail
+          test -d output
+          test "$(find output -type f | wc -l)" -gt 0
+          zip -qr blutter-output.zip output
+
+      - name: Upload ZIP artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blutter-output
+          path: blutter-output.zip
+          if-no-files-found: error
+          retention-days: 14
