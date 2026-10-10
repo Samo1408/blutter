@@ -48,7 +48,7 @@ jobs:
           git clone --depth 1 https://github.com/worawit/blutter.git blutter-src
           git -C blutter-src fetch --depth 1 origin pull/213/head:refs/remotes/origin/pr-213
           git -C blutter-src checkout refs/remotes/origin/pr-213
-          mkdir -p blutter-src/input blutter-src/output
+          mkdir -p blutter-src/input blutter-src/output-full blutter-src/output-no-analysis
           cp input/libapp.so input/libflutter.so blutter-src/input/
           git -C blutter-src log -1 --oneline
 
@@ -60,35 +60,50 @@ jobs:
             echo "=== libapp.so ==="
             file input/libapp.so
             readelf -h input/libapp.so | grep -E 'Class:|Machine:'
-            echo "=== snapshot symbols ==="
             readelf -Ws input/libapp.so | grep -E '_kDart(Vm)?Snapshot(Data|Instructions|BuildId)' || true
             echo "=== libflutter.so ==="
             file input/libflutter.so
             readelf -h input/libflutter.so | grep -E 'Class:|Machine:'
           } | tee elf-report.txt
 
-      - name: Run Blutter and preserve diagnostics
+      - name: Run full analysis, then fallback without code analysis
+        id: run_blutter
         shell: bash
         env:
           CC: gcc-13
           CXX: g++-13
         run: |
           set -uo pipefail
-          mkdir -p blutter-src/output artifact-package
+          mkdir -p blutter-src/output-full blutter-src/output-no-analysis artifact-package
+
+          echo "=== Attempt 1: full analysis ===" | tee full-analysis.log
           set +e
-          .venv/bin/python blutter-src/blutter.py blutter-src/input blutter-src/output 2>&1 | tee blutter-run.log
-          status=${PIPESTATUS[0]}
+          .venv/bin/python blutter-src/blutter.py blutter-src/input blutter-src/output-full 2>&1 | tee -a full-analysis.log
+          full_status=${PIPESTATUS[0]}
           set -e
-          printf '%s\n' "$status" > blutter-exit-code.txt
-          echo "Blutter process exit code: $status"
-          output_count=$(find blutter-src/output -type f 2>/dev/null | wc -l)
-          echo "Output file count: $output_count"
-          if [ "$status" -ne 0 ] || grep -qE 'Analysis error|exception:|Traceback \(most recent call last\)|fatal error:|(^|[[:space:]])error:' blutter-run.log; then
-            echo "FAILED: Blutter reported analysis/build errors." > analysis-status.txt
-          elif [ "$output_count" -eq 0 ]; then
-            echo "FAILED: Blutter exited without errors but generated no output files." > analysis-status.txt
+          full_count=$(find blutter-src/output-full -type f 2>/dev/null | wc -l)
+          if [ "$full_status" -eq 0 ] && [ "$full_count" -gt 0 ] && ! grep -qE 'Analysis error|exception:|Traceback \(most recent call last\)' full-analysis.log; then
+            echo "SUCCESS: full analysis generated $full_count files." | tee analysis-status.txt
           else
-            echo "SUCCESS: Blutter generated output files." > analysis-status.txt
+            echo "Full analysis did not produce valid output (exit=$full_status, files=$full_count)." | tee analysis-status.txt
+            echo "=== Attempt 2: --no-analysis fallback ===" | tee no-analysis.log
+            set +e
+            .venv/bin/python blutter-src/blutter.py blutter-src/input blutter-src/output-no-analysis --no-analysis 2>&1 | tee -a no-analysis.log
+            no_status=${PIPESTATUS[0]}
+            set -e
+            no_count=$(find blutter-src/output-no-analysis -type f 2>/dev/null | wc -l)
+            if [ "$no_status" -eq 0 ] && [ "$no_count" -gt 0 ]; then
+              echo "PARTIAL_SUCCESS: --no-analysis generated $no_count files; full analysis failed." | tee -a analysis-status.txt
+            else
+              echo "FAILED: full analysis and --no-analysis fallback both failed (fallback exit=$no_status, files=$no_count)." | tee -a analysis-status.txt
+            fi
+          fi
+          printf '%s\n' "$full_status" > full-analysis-exit-code.txt
+          echo "Full-analysis output files: $full_count"
+          find blutter-src/output-full -type f -printf '%p (%s bytes)\n' || true
+          if [ -f no-analysis.log ]; then
+            echo "Fallback output files:"
+            find blutter-src/output-no-analysis -type f -printf '%p (%s bytes)\n' || true
           fi
 
       - name: Prepare artifact contents
@@ -96,47 +111,44 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifact-package
-          [ ! -f blutter-run.log ] || cp blutter-run.log artifact-package/
+          mkdir -p artifact-package/full-analysis artifact-package/no-analysis
+          [ ! -f full-analysis.log ] || cp full-analysis.log artifact-package/
+          [ ! -f no-analysis.log ] || cp no-analysis.log artifact-package/
           [ ! -f elf-report.txt ] || cp elf-report.txt artifact-package/
-          [ ! -f blutter-exit-code.txt ] || cp blutter-exit-code.txt artifact-package/
           [ ! -f analysis-status.txt ] || cp analysis-status.txt artifact-package/
-          if [ -d blutter-src/output ]; then
-            mkdir -p artifact-package/output
-            cp -a blutter-src/output/. artifact-package/output/
-          fi
+          [ ! -f full-analysis-exit-code.txt ] || cp full-analysis-exit-code.txt artifact-package/
+          if [ -d blutter-src/output-full ]; then cp -a blutter-src/output-full/. artifact-package/full-analysis/; fi
+          if [ -d blutter-src/output-no-analysis ]; then cp -a blutter-src/output-no-analysis/. artifact-package/no-analysis/; fi
           {
-            echo "Blutter run diagnostics"
+            echo "Blutter Dart 3.13 diagnostics"
             echo "Commit: $(git -C blutter-src rev-parse HEAD 2>/dev/null || echo unavailable)"
-            echo "Input libapp SHA256: $(sha256sum input/libapp.so 2>/dev/null | cut -d' ' -f1 || echo unavailable)"
-            echo "Input libflutter SHA256: $(sha256sum input/libflutter.so 2>/dev/null | cut -d' ' -f1 || echo unavailable)"
-            echo "Output files:"
-            find artifact-package/output -type f -printf '%p (%s bytes)\n' 2>/dev/null || true
+            echo "Input libapp SHA256: $(sha256sum input/libapp.so | cut -d' ' -f1)"
+            echo "Input libflutter SHA256: $(sha256sum input/libflutter.so | cut -d' ' -f1)"
             echo
             cat artifact-package/analysis-status.txt 2>/dev/null || true
+            echo
+            echo "Generated files:"
+            find artifact-package -type f -printf '%p (%s bytes)\n'
           } > artifact-package/diagnostics.txt
-          echo "=== Artifact contents ==="
+          echo "=== Artifact files ==="
           find artifact-package -type f -printf '%p (%s bytes)\n'
 
-      - name: Upload output and diagnostics
+      - name: Upload outputs and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: blutter-results-and-diagnostics
+          name: blutter-run12-results
           path: artifact-package/
           if-no-files-found: error
           retention-days: 14
 
-      - name: Fail job if analysis failed
+      - name: Fail only if both attempts failed
         if: always()
         shell: bash
         run: |
-          if [ -f analysis-status.txt ] && grep -q '^FAILED:' analysis-status.txt; then
-            cat analysis-status.txt
-            exit 1
-          fi
           if [ ! -f analysis-status.txt ]; then
-            echo "::error::Blutter did not reach the analysis stage; inspect preceding steps."
+            echo "::error::Blutter did not reach the analysis stage."
             exit 1
           fi
           cat analysis-status.txt
+          if grep -q '^FAILED:' analysis-status.txt; then exit 1; fi
