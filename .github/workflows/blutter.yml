@@ -60,6 +60,34 @@ jobs:
           cmake --version
           ninja --version
 
+      - name: Patch Dart 3.13 snapshot symbol compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+
+          path = Path("extract_dart_info.py")
+          source = path.read_text()
+          old = "sym = dynsym.get_symbol_by_name('_kDartVmSnapshotData')[0]"
+          new = (
+              "syms = (dynsym.get_symbol_by_name('_kDartVmSnapshotData') or "
+              "dynsym.get_symbol_by_name('_kDartSnapshotData'))\\n"
+              "    assert syms, \\"Cannot find Dart snapshot data symbol "
+              "(_kDartVmSnapshotData/_kDartSnapshotData)\\"\\n"
+              "    sym = syms[0]"
+          )
+          if old in source:
+              path.write_text(source.replace(old, new, 1))
+              print("Applied compatibility fallback for _kDartSnapshotData")
+          elif "_kDartSnapshotData" in source and "_kDartVmSnapshotData" in source:
+              print("Compatible symbol fallback already appears to be present")
+          else:
+              raise SystemExit(
+                  "Could not safely patch extract_dart_info.py; upstream source changed"
+              )
+          PY
+
       - name: Run Blutter
         env:
           CC: gcc-13
