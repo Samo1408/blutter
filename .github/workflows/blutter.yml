@@ -69,23 +69,31 @@ jobs:
 
           path = Path("extract_dart_info.py")
           source = path.read_text()
-          old = "sym = dynsym.get_symbol_by_name('_kDartVmSnapshotData')[0]"
-          new = (
-              "syms = (dynsym.get_symbol_by_name('_kDartVmSnapshotData') or "
-              "dynsym.get_symbol_by_name('_kDartSnapshotData'))\n"
-              "    assert syms, 'Cannot find Dart snapshot data symbol'\n"
-              "    sym = syms[0]"
-          )
+          lines = source.splitlines()
+          target = "sym = dynsym.get_symbol_by_name('_kDartVmSnapshotData')[0]"
 
-          if old in source:
-              path.write_text(source.replace(old, new, 1))
-              print("Applied fallback to _kDartSnapshotData")
-          elif "get_symbol_by_name('_kDartSnapshotData')" in source:
-              print("Snapshot symbol fallback already exists")
+          for index, line in enumerate(lines):
+              if line.strip() == target:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  replacement = [
+                      indent + "syms = dynsym.get_symbol_by_name('_kDartVmSnapshotData')",
+                      indent + "if not syms:",
+                      indent + "    syms = dynsym.get_symbol_by_name('_kDartSnapshotData')",
+                      indent + "assert syms, 'Cannot find Dart snapshot data symbol (_kDartVmSnapshotData/_kDartSnapshotData)'",
+                      indent + "sym = syms[0]",
+                  ]
+                  lines[index:index + 1] = replacement
+                  patched = "\n".join(lines) + ("\n" if source.endswith("\n") else "")
+                  compile(patched, str(path), "exec")
+                  path.write_text(patched)
+                  print("Applied snapshot-symbol fallback and verified Python syntax")
+                  break
           else:
-              raise SystemExit(
-                  "Could not safely patch extract_dart_info.py; upstream source changed"
-              )
+              if "_kDartSnapshotData" in source and "_kDartVmSnapshotData" in source:
+                  compile(source, str(path), "exec")
+                  print("Snapshot-symbol fallback already present; syntax is valid")
+              else:
+                  raise SystemExit("Could not safely patch extract_dart_info.py; upstream source changed")
           PY
 
       - name: Run Blutter
